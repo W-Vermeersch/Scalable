@@ -1,0 +1,22 @@
+services:
+  jupyter:
+    build: .
+    container_name: anime-spark-jupyter
+    ports:
+      - "8888:8888"   # Jupyter Lab
+      - "4040:4040"   # Spark UI
+    volumes:
+      # Your notebooks folder — changes saved here survive container restarts
+      - ./notebooks:/home/jovyan/work/notebooks
+      # Your CSV data folder — read from your local machine
+      - ./data:/home/jovyan/work/data
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=anime123          # Change this to your preferred token
+      - PYSPARK_PYTHON=python3
+      - PYSPARK_DRIVER_PYTHON=python3
+    command: >
+      start-notebook.sh
+      --NotebookApp.token='anime123'
+      --NotebookApp.notebook_dir='/home/jovyan/work'
+      --no-browser
