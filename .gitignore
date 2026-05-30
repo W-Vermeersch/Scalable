@@ -212,3 +212,4 @@ data/*
 
 models/*
 output/*
+notebooks/.ipynb_checkpoints/*
