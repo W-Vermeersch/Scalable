@@ -6,10 +6,14 @@ services:
       - "8888:8888"   # Jupyter Lab
       - "4040:4040"   # Spark UI
     volumes:
-      # Your notebooks folder — changes saved here survive container restarts
+      # Your notebooks folder
       - ./notebooks:/home/jovyan/work/notebooks
-      # Your CSV data folder — read from your local machine
+      # Your CSV data folder
       - ./data:/home/jovyan/work/data
+      # Your output folder
+      - ./output:/home/jovyan/work/output
+      # Your models
+      - ./models:/home/jovyan/work/models
     environment:
       - JUPYTER_ENABLE_LAB=yes
       - JUPYTER_TOKEN=anime123          # Change this to your preferred token
