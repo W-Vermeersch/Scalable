@@ -209,3 +209,7 @@ __marimo__/
 # ignore the big datasets
 data/*
 !data/preprocessed/
+
+models/*
+output/*
+notebooks/.ipynb_checkpoints/*
