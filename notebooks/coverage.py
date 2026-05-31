@@ -1,14 +1,10 @@
-from recommenders import hybridV1
+from recommenders import hybridV1, calculate_ui_weights
 import pandas as pd
 import numpy as np
 from pyspark.sql.functions import  col, explode
+from itertools import combinations
 
 def precision_recall_at_k(user_id, recommendations, dataset, k=10, threshold=7.0):
-    """
-    recommendations : pandas DataFrame with anime_id column (your hybrid output)
-    threshold       : minimum score to consider an anime 'relevant'
-    """
-    # Ground truth — anime the user rated highly (held out)
     relevant = set(
         dataset.filter(
             (col('user_id') == user_id) & (col('score') >= threshold)
@@ -20,11 +16,9 @@ def precision_recall_at_k(user_id, recommendations, dataset, k=10, threshold=7.0
     hits = recommended & relevant
 
     precision = len(hits) / k
-    recall    = len(hits) / len(relevant) if relevant else 0.0
 
     return {
         'precision@k': precision,
-        'recall@k':    recall,
         'hits':        len(hits),
         'k':           k,
         'n_relevant':  len(relevant)
@@ -49,11 +43,7 @@ def catalog_coverage(recommendations_list, dataset, sample_n=100):
 
 
 def diversity_score(recommendations, anime_data):
-    """
-    Measures average pairwise genre dissimilarity within a recommendation list.
-    Score of 1.0 = all different genres, 0.0 = all identical genres.
-    """
-    from itertools import combinations
+
 
     recs_with_genre = recommendations.merge(
         anime_data.select('anime_id', 'genre').toPandas(),
@@ -79,10 +69,6 @@ def diversity_score(recommendations, anime_data):
 
 
 def novelty_score(recommendations, dataset):
-    """
-    Lower popularity rank = more novel.
-    Based on the idea that recommending obvious popular anime is less useful.
-    """
     popularity = dataset.groupBy('anime_id') \
         .count().toPandas().set_index('anime_id')['count']
 
@@ -91,7 +77,6 @@ def novelty_score(recommendations, dataset):
     scores = []
     for aid in recommendations['anime_id']:
         pop = popularity.get(aid, 1)
-        # Self-information: rare items have higher novelty
         novelty = -np.log2(pop / total_users + 1e-9)
         scores.append(novelty)
 
@@ -102,7 +87,7 @@ def evaluate_all(user_id, ui_model, ui_model_better, ii_model, final_data,
 
     results = {}
 
-    # --- ALS only ---
+    # Collaborative-filtering
     target_user = spark.createDataFrame([(user_id,)], ['user_id'])
     als_recs = ui_model.recommendForUserSubset(target_user, k) \
         .select('user_id', explode('recommendations').alias('rec')) \
@@ -114,29 +99,55 @@ def evaluate_all(user_id, ui_model, ui_model_better, ii_model, final_data,
         .select(col('rec.anime_id').alias('anime_id')) \
         .toPandas()
 
-    # --- Content-based only ---
+    # Content-based
     ii_recs = ii_model(user_id, k)
 
-    # --- Hybrid ---
+    # Hybrid
     hybrid_recs = hybridV1(
         user_id, ui_model, ii_model, final_data, score_history, spark, n=k
     )
-    hybrid_pd = hybrid_recs if hybrid_recs is not None else pd.DataFrame()
 
-    for name, recs in [('ALS', als_recs),('ALS_better', als_recs_better), ('Content', ii_recs), ('Hybrid', hybrid_pd)]:
-        if recs is None or recs.empty:
-            print(f'{name}: no recommendations')
-            continue
+    hybrid_recs_better = hybridV1(
+        user_id, ui_model_better, ii_model, final_data, score_history, spark, n=k
+    )
 
-        pr    = precision_recall_at_k(user_id, recs, final_data, k=k)
-        div   = diversity_score(recs, anime_data)
-        nov   = novelty_score(recs, final_data)
+    hybrid_recs_3 = hybridV1(
+        user_id, ui_model, ii_model, final_data, score_history, spark, n=k, ui_weight=0.7,ii_weight=0.3
+    )
+
+    hybrid_recs_better_3 = hybridV1(
+        user_id, ui_model_better, ii_model, final_data, score_history, spark, n=k, ui_weight=0.7,ii_weight=0.3
+    )
+
+    hybrid_recs_7 = hybridV1(
+        user_id, ui_model, ii_model, final_data, score_history, spark, n=k, ui_weight=0.3,ii_weight=0.7
+    )
+
+    hybrid_recs_better_7 = hybridV1(
+        user_id, ui_model_better, ii_model, final_data, score_history, spark, n=k, ui_weight=0.3,ii_weight=0.7
+    )
+    dynamic_w = calculate_ui_weights(final_data, user_id)
+    print(f"Dynamic weights: {round(dynamic_w, 4)}")
+    hybrid_recs_d = hybridV1(
+        user_id, ui_model, ii_model, final_data, score_history, spark, n=k, ui_weight=dynamic_w,ii_weight=(1 - dynamic_w)
+    )
+
+    hybrid_recs_better_d = hybridV1(
+        user_id, ui_model_better, ii_model, final_data, score_history, spark, n=k, ui_weight=dynamic_w,ii_weight=(1 - dynamic_w)
+    )
+
+    for name, recs in [ ('ALS', als_recs),('ALS_better', als_recs_better), ('Content', ii_recs), ('Hybrid', hybrid_recs), ('Hybrid (better ALS)', hybrid_recs_better),
+                        ('Hybrid (w=3 ii)', hybrid_recs_3), ('Hybrid (better ALS) (w=3 ii)', hybrid_recs_better_3),('Hybrid (w=7 ii)', hybrid_recs_7), ('Hybrid (better ALS) (w=7 ii)', hybrid_recs_better_7),
+                        ('Hybrid (dynamic)', hybrid_recs_d), ('Hybrid (better ALS) (dynamic)', hybrid_recs_better_d)]:
+
+        pr = precision_recall_at_k(user_id, recs, final_data, k=k)
+        div = diversity_score(recs, anime_data)
+        nov = novelty_score(recs, final_data)
 
         results[name] = {
             'precision@k': round(pr['precision@k'], 4),
-            'recall@k':    round(pr['recall@k'],    4),
-            'diversity':   round(div,                4),
-            'novelty':     round(nov,                4),
+            'diversity': round(div, 4),
+            'novelty': round(nov, 4),
         }
-
-    return pd.DataFrame(results).T
+    print(f"Number of ratings: {final_data.filter(col('user_id') == user_id).count()}")
+    return pd.DataFrame(results).transpose

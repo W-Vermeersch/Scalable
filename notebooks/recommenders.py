@@ -1,41 +1,18 @@
-from pyspark.ml.recommendation import ALS
 import numpy as np
 from pyspark.ml.feature import CountVectorizer
 from pyspark.sql.functions import split, lower, trim, col, regexp_replace, explode, min, max, lit, udf, mean
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
-from pyspark.sql.types import FloatType
-import time
-
-
-def train_user_item(train):
-    als = ALS(
-    maxIter=10,
-    regParam=0.1,
-    rank=10,
-    userCol='user_id',
-    itemCol='anime_uid',
-    ratingCol='score',
-    coldStartStrategy='drop'  # safe now — all test users exist in train
-    )
-
-    return als.fit(train)
 
 def train_item_item(anime_data):
-    anime_clean = anime_data \
-        .withColumn('genre_stripped',
-            regexp_replace(col('genre'), r"[\[\]']", '')  # remove [ ] and '
-        ) \
-        .withColumn('genres_array',
-            split(lower(trim(col('genre_stripped'))), ',\\s*')
-        ) \
-        .drop('genre_stripped') \
-        .dropna(subset=['genre'])
+    anime_clean = anime_data.withColumn('genres_array',
+            split(lower(trim(col('genre'))), ',\\s*')
+        ).dropna(subset=['genre'])
     
+    # vectorize anime genres
     cv = CountVectorizer(inputCol='genres_array', outputCol='tfidf', binary=True)
     anime_vectorized = cv.fit(anime_clean).transform(anime_clean)
 
-    # Pull vectors to driver — fine for a few thousand anime
     anime_pd = anime_vectorized.select('anime_id', 'tfidf').toPandas()
     anime_pd['vec'] = anime_pd['tfidf'].apply(lambda v: v.toArray())
 
@@ -47,7 +24,7 @@ def train_item_item(anime_data):
     idx_to_uid = anime_pd['anime_id'].to_dict()
     uid_to_idx = {v: k for k, v in idx_to_uid.items()}
 
-    genre_lookup = anime_clean.select('anime_id', 'genre').toPandas().set_index('anime_id')
+    # genre_lookup = anime_clean.select('anime_id', 'genre').toPandas().set_index('anime_id')
 
     def content_recommend(anime_id, n=10):
         if anime_id not in uid_to_idx:
@@ -66,7 +43,7 @@ def train_item_item(anime_data):
         })
         
         # Join genre info back
-        results['genre'] = results['anime_id'].map(genre_lookup['genre'])
+        # results['genre'] = results['anime_id'].map(genre_lookup['genre'])
         
         return results
     
@@ -77,10 +54,10 @@ def train_item_item(anime_data):
         c_idx = uid_to_idx[anime_id]
 
         weighted_scores = [
-            sim_matrix[uid_to_idx[watched_id]][c_idx] * ((user_rating - 5.0) if user_rating != 0.0 else 0.0)# (user_rating / 10.0)
+            sim_matrix[uid_to_idx[watched_id]][c_idx] * ((user_rating - 5.0) if user_rating != 0.0 else 0.0)
             for watched_id, user_rating in history_catalog
-            if watched_id in uid_to_idx        # skip history items not in model
-            and watched_id != anime_id         # skip if candidate is in history
+            if watched_id in uid_to_idx
+            and watched_id != anime_id
         ]
 
         if not weighted_scores:
@@ -91,36 +68,25 @@ def train_item_item(anime_data):
     return content_recommend, score_base_history
 
 def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10):
-    base_time = time.time()
-    total_time = time.time()
     history_df = dataset.filter(col('user_id') == user_id) \
         .select('anime_id', 'score').orderBy('score', ascending=False).toPandas()
     
-    slice_history = history_df.head(n)
 
     if history_df.empty:
         print(f'User {user_id} has no watch history')
         return None
 
     user_history_ids  = history_df['anime_id'].tolist()
-    # user_history_catalog= list(zip(slice_history['anime_id'], slice_history['score']))
     full_history_catalog= list(zip(history_df['anime_id'], history_df['score']))
-
-    # print(f"Get history: {time.time() - base_time} secs!")
-    # print(f'Size of history: {len(user_history_ids)}')
-    base_time = time.time()
-    loop_time = base_time
 
     candidate_scores = {}   # anime_id → list of weighted similarity scores
 
-    for watched_id in history_df['anime_id']: # Test by swithcing between sliced and not sliced history (better ranks or better performance)
+    for watched_id in user_history_ids: # Test by swithcing between sliced and not sliced history (better ranks or better performance)
 
         sim_set = item_model(watched_id, n)
 
 
         for w_idx in sim_set['anime_id']:
-
-            # w_idx = row['anime_id']
 
             # Skip anime the user already watched
             if w_idx in user_history_ids:
@@ -130,9 +96,6 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
                 candidate_scores[w_idx] = score_history(w_idx, full_history_catalog) # Better scoring than just rating and similarity
 
 
-    # print(f"Get candidates: {time.time() - base_time} secs!")
-    base_time = time.time()
-
     if not candidate_scores:
         print(f'No candidates found for user {user_id}')
         return None
@@ -140,20 +103,16 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
     results = pd.DataFrame([
         {
             'anime_id':     aid,
-            # 'avg_sim':      float(np.mean(scores)),
             'avg_sim':      scores,
         }
         for aid, scores in candidate_scores.items()
     ])
 
-    # Normalize avg_sim to [0, 1] first
+    # Normalize avg_sim
     s_min, s_max = results['avg_sim'].min(), results['avg_sim'].max()
     results['final_score'] = (results['avg_sim'] - s_min) / (s_max - s_min + 1e-9)
 
     top_n = results.sort_values('final_score', ascending=False).head(n)
-
-    # print(f"Process results: {time.time() - base_time} secs!")
-    # print(f"Total time: {time.time() - total_time} secs!")
 
 
     return top_n[['anime_id', 'avg_sim','final_score']]
@@ -163,11 +122,8 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
     
 
     II_rec = item_item(user_id, n * 5)
-    if II_rec is None or II_rec.empty:
-        print('No content-based candidates found')
-        return None
 
-    # --- Step 2: Build history catalog once ---
+    # Build history catalog
     history_catalog = list(zip(
         dataset.filter(col('user_id') == user_id)
                .select('anime_id', 'score').toPandas()['anime_id'],
@@ -175,16 +131,18 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
                .select('anime_id', 'score').toPandas()['score']
     ))
 
-    # --- Step 3: ALS top-N recommendations ---
+    # ALS recommendations
     target_user = spark.createDataFrame([(user_id,)], ['user_id'])
-    UI_rec_pd = user_item.recommendForUserSubset(target_user, n * 5) \
-        .select('user_id', explode('recommendations').alias('rec')) \
-        .select(
+    UI_rec_pd = user_item.recommendForUserSubset(
+        target_user, n * 5
+        ).select('user_id', 
+                explode('recommendations').alias('rec')
+            ).select(
             col('rec.anime_id').alias('anime_id'),
             col('rec.rating').alias('ui_score')
-        ).toPandas()  # bring to pandas — score_history runs here, no broadcast needed
+        ).toPandas()
 
-    # Compute ii_score in pandas — score_history is a plain Python call
+    # Compute ii_score for user-item
     UI_rec_pd['ii_score'] = UI_rec_pd['anime_id'].apply(
         lambda aid: score_history(aid, history_catalog)
     )
@@ -204,13 +162,13 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
         lambda aid: score_history(aid, history_catalog)
     )
 
-    # --- Step 5: Union in pandas and average duplicates ---
+    # Merge recommends from item-item and user-item
     merged = pd.concat([
         UI_rec_pd[['anime_id', 'ui_score', 'ii_score']],
         II_rec_pd[['anime_id', 'ui_score', 'ii_score']]
     ]).groupby('anime_id', as_index=False).mean()
 
-    # --- Step 6: Normalize to [0, 1] ---
+    # Normalize ui- & ii-score 
     for c in ['ui_score', 'ii_score']:
         mn, mx = merged[c].min(), merged[c].max()
         merged[f'{c}_norm'] = (merged[c] - mn) / (mx - mn + 1e-9)
@@ -220,12 +178,13 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
         ii_weight * merged['ii_score_norm']
     )
 
-    result = merged.sort_values('hybrid_score', ascending=False).head(n)
-
-    # result_spark = spark.createDataFrame(result)
-    # result_spark.select('anime_id', 'ui_score', 'ii_score', 'hybrid_score').show(n, truncate=False)
-    return result
+    return merged.sort_values('hybrid_score', ascending=False).head(n)
 
 
-# def hybridV2(user_id, dataset, user_item, item_item, n=10):
-#     return
+def calculate_ui_weights(dataset, user_id):
+    n = dataset.filter(col('user_id') == user_id).count()
+
+    history_factor = np.clip(n / 10.0, 1.0, 10.0)
+    weight = 0.2 * history_factor
+
+    return np.clip(weight, 0.2, 0.8)
