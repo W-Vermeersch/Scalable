@@ -4,7 +4,18 @@ from pyspark.sql.functions import split, lower, trim, col, regexp_replace, explo
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
-def train_item_item(anime_data):
+import numpy as np
+
+def jaccard_matrix(matrix):
+    # matrix rows are binary genre vectors
+    # intersection = dot product of binary vectors
+    intersection = np.dot(matrix, matrix.transpose)
+    # union = |A| + |B| - |A∩B|
+    row_sums = matrix.sum(axis=1)
+    union = row_sums[:, None] + row_sums[None, :] - intersection
+    return intersection / (union + 1e-9)
+
+def train_item_item(anime_data, matrix_calc = cosine_similarity):
     anime_clean = anime_data.withColumn('genres_array',
             split(lower(trim(col('genre'))), ',\\s*')
         ).dropna(subset=['genre'])
@@ -18,7 +29,7 @@ def train_item_item(anime_data):
 
     # Build matrix and compute all pairwise similarities at once
     matrix = np.vstack(anime_pd['vec'].values)
-    sim_matrix = cosine_similarity(matrix)  # shape: (n_anime, n_anime)
+    sim_matrix = matrix_calc(matrix)  # shape: (n_anime, n_anime)
 
     # Map index → anime_id
     idx_to_uid = anime_pd['anime_id'].to_dict()
@@ -63,7 +74,7 @@ def train_item_item(anime_data):
         if not weighted_scores:
             return 0.0
 
-        return float(np.mean(weighted_scores))
+        return float(np.sum(weighted_scores))
     
     return content_recommend, score_base_history
 
@@ -184,7 +195,10 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
 def calculate_ui_weights(dataset, user_id):
     n = dataset.filter(col('user_id') == user_id).count()
 
-    history_factor = np.clip(n / 10.0, 1.0, 10.0)
+    return calculate_ui_weights_size(n)
+
+def calculate_ui_weights_size(size, scaler=1.0):
+    history_factor = np.clip(size / (10.0 * scaler), 1.0, 10.0)
     weight = 0.2 * history_factor
 
     return np.clip(weight, 0.2, 0.8)
