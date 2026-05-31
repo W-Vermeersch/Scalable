@@ -106,8 +106,8 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
     # user_history_catalog= list(zip(slice_history['anime_id'], slice_history['score']))
     full_history_catalog= list(zip(history_df['anime_id'], history_df['score']))
 
-    print(f"Get history: {time.time() - base_time} secs!")
-    print(f'Size of history: {len(user_history_ids)}')
+    # print(f"Get history: {time.time() - base_time} secs!")
+    # print(f'Size of history: {len(user_history_ids)}')
     base_time = time.time()
     loop_time = base_time
 
@@ -130,7 +130,7 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
                 candidate_scores[w_idx] = score_history(w_idx, full_history_catalog) # Better scoring than just rating and similarity
 
 
-    print(f"Get candidates: {time.time() - base_time} secs!")
+    # print(f"Get candidates: {time.time() - base_time} secs!")
     base_time = time.time()
 
     if not candidate_scores:
@@ -152,155 +152,78 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
 
     top_n = results.sort_values('final_score', ascending=False).head(n)
 
-    print(f"Process results: {time.time() - base_time} secs!")
-    print(f"Total time: {time.time() - total_time} secs!")
+    # print(f"Process results: {time.time() - base_time} secs!")
+    # print(f"Total time: {time.time() - total_time} secs!")
 
 
     return top_n[['anime_id', 'avg_sim','final_score']]
     
 
-
 def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10, ui_weight=0.5, ii_weight=0.5):
-    # UI_rec = user_item(user_id, n)
-    II_rec = item_item(user_id, n)
-
-    history_df = dataset.filter(col('user_id') == user_id) \
-        .select('anime_id', 'score').toPandas()
-
-
-    target_user = spark.createDataFrame([(user_id,)], ['user_id'])
-    UI_rec = user_item.recommendForUserSubset(target_user, 10)
-
-    # Flatten the recommendations array
-    UI_rec_flat = UI_rec.select(
-        'user_id',
-        explode('recommendations').alias('rec')
-    ).select(
-        'user_id',
-        col('rec.anime_id').alias('anime_id'),
-        col('rec.rating').alias('ui_score')
-    )
-
     
 
+    II_rec = item_item(user_id, n * 5)
+    if II_rec is None or II_rec.empty:
+        print('No content-based candidates found')
+        return None
+
+    # --- Step 2: Build history catalog once ---
+    history_catalog = list(zip(
+        dataset.filter(col('user_id') == user_id)
+               .select('anime_id', 'score').toPandas()['anime_id'],
+        dataset.filter(col('user_id') == user_id)
+               .select('anime_id', 'score').toPandas()['score']
+    ))
+
+    # --- Step 3: ALS top-N recommendations ---
+    target_user = spark.createDataFrame([(user_id,)], ['user_id'])
+    UI_rec_pd = user_item.recommendForUserSubset(target_user, n * 5) \
+        .select('user_id', explode('recommendations').alias('rec')) \
+        .select(
+            col('rec.anime_id').alias('anime_id'),
+            col('rec.rating').alias('ui_score')
+        ).toPandas()  # bring to pandas — score_history runs here, no broadcast needed
+
+    # Compute ii_score in pandas — score_history is a plain Python call
+    UI_rec_pd['ii_score'] = UI_rec_pd['anime_id'].apply(
+        lambda aid: score_history(aid, history_catalog)
+    )
+
+    # --- Step 4: Score II candidates through ALS ---
     pairs = spark.createDataFrame(
         [(user_id, int(aid)) for aid in II_rec['anime_id']],
         ['user_id', 'anime_id']
     )
 
-    # ALS transform scores every (user, item) pair it recognises
-    II_after_ALS = user_item.transform(pairs).select(
-            'anime_id',
-            col('prediction').alias('ui_score')
-        ).dropna(
-            subset=['ui_score']
-        )
+    II_rec_pd = user_item.transform(pairs) \
+        .select('anime_id', col('prediction').alias('ui_score')) \
+        .dropna(subset=['ui_score']) \
+        .toPandas()
 
-    # II_rec_flat = predictions.select(
-    #     'user_id',
-    #     'anime_id',
-    #     col('prediction').alias('ui_score')
-    # ).dropna(subset=['ui_score'] # drop cold-start entries ALS couldn't score
-    # )
-
-    II_rec_spark = spark.createDataFrame(II_rec[['anime_id', 'avg_sim', 'final_score']].rename(
-            columns={'final_score': 'ii_score'}
-        ))
-
-    II_rec_flat = II_after_ALS.join(II_rec_spark, on='anime_id', how='inner')
-
-    # UI_rec_flat.show(truncate=False)
-    # II_rec_flat.show(truncate=False)
-
-def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10, ui_weight=0.5, ii_weight=0.5):
-    
-
-    # Prepare history for item-item scoring of user-item recommendations 
-    history_df = dataset.filter(col('user_id') == user_id) \
-        .select('anime_id', 'score').toPandas()
-    history_catalog = list(zip(history_df['anime_id'], history_df['score']))
-
-    def score_history_udf_fn(anime_id):
-        return float(score_history(anime_id, history_catalog))
-
-    score_history_udf = udf(score_history_udf_fn, FloatType())
-
-
-    # User-item recommendations for user
-    target_user = spark.createDataFrame([(user_id,)], ['user_id'])
-    UI_rec = user_item.recommendForUserSubset(target_user, 10)
-
-    # Flatten the recommendations from user-item
-    UI_rec_flat = UI_rec.select(
-        'user_id',
-        explode('recommendations').alias('rec')
-    ).select(
-        'user_id',
-        col('rec.anime_id').alias('anime_id'),
-        col('rec.rating').alias('ui_score')
+    II_rec_pd['ii_score'] = II_rec_pd['anime_id'].apply(
+        lambda aid: score_history(aid, history_catalog)
     )
 
-    
-    # Item-item recommendations for user
-    II_rec = item_item(user_id, n)
+    # --- Step 5: Union in pandas and average duplicates ---
+    merged = pd.concat([
+        UI_rec_pd[['anime_id', 'ui_score', 'ii_score']],
+        II_rec_pd[['anime_id', 'ui_score', 'ii_score']]
+    ]).groupby('anime_id', as_index=False).mean()
 
-    # ALS transform add a user-item score to the anime recommended by item-item
-    pairs = spark.createDataFrame(
-        [(user_id, int(aid)) for aid in II_rec['anime_id']],
-        ['user_id', 'anime_id']
-    )
-    II_after_ALS = user_item.transform(pairs).select(
-            'anime_id',
-            col('prediction').alias('ui_score')
-        ).dropna(
-            subset=['ui_score']
-        )
+    # --- Step 6: Normalize to [0, 1] ---
+    for c in ['ui_score', 'ii_score']:
+        mn, mx = merged[c].min(), merged[c].max()
+        merged[f'{c}_norm'] = (merged[c] - mn) / (mx - mn + 1e-9)
 
-    # For ite-item pairs, combine ii_score & ui_score
-    II_rec_spark = spark.createDataFrame(II_rec[['anime_id', 'avg_sim', 'final_score']].rename(
-            columns={'final_score': 'ii_score'}
-        ))
-    II_rec_flat = II_after_ALS.join(II_rec_spark, on='anime_id', how='inner')
-
-
-    # Add ite-item score to result from ALS
-    UI_rec_flat = UI_rec_flat.withColumn('ii_score', score_history_udf(col('anime_id')))
-
-
-    # Merge the recommendations from user-item & item-item
-    merged = UI_rec_flat.union(II_rec_flat) \
-        .groupBy('anime_id') \
-        .agg(
-            mean('ui_score').alias('ui_score'),
-            mean('ii_score').alias('ii_score')
-        )
-
-    # Prepare min and max for normalization
-    ui_min, ui_max = merged.agg(
-        min('ui_score'), max('ui_score')
-    ).first()
-
-    ii_min, ii_max = merged.agg(
-        min('ii_score'), max('ii_score')
-    ).first()
-
-    # Normalize the scores
-    merged = merged.withColumn('ui_score_norm',
-            (col('ui_score') - lit(ui_min)) / lit(ui_max - ui_min + 1e-9)
-        ).withColumn('ii_score_norm',
-            (col('ii_score') - lit(ii_min)) / lit(ii_max - ii_min + 1e-9)
-        )
-
-    # Calculate hybrid score with weights
-    merged = merged.withColumn(
-        'hybrid_score',
-        lit(ui_weight) * col('ui_score_norm') +
-        lit(ii_weight) * col('ii_score_norm')
+    merged['hybrid_score'] = (
+        ui_weight * merged['ui_score_norm'] +
+        ii_weight * merged['ii_score_norm']
     )
 
-    result = merged.orderBy('hybrid_score', ascending=False).limit(n*2)
+    result = merged.sort_values('hybrid_score', ascending=False).head(n)
 
-    result.select('anime_id', 'ui_score', 'ii_score', 'hybrid_score').show(n*2, truncate=False)
+    # result_spark = spark.createDataFrame(result)
+    # result_spark.select('anime_id', 'ui_score', 'ii_score', 'hybrid_score').show(n, truncate=False)
     return result
 
 
