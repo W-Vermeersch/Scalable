@@ -48,3 +48,7 @@ docker compose down      # stop (notebooks and data are preserved)
 - Any notebooks you save inside `notebooks/` persist on your local machine.
 - Your CSV data is mounted read-only; Spark reads it directly from `data/preprocessed/`.
 - To change the token, edit `JUPYTER_TOKEN` and `--NotebookApp.token` in `docker-compose.yml`.
+
+
+# Benchmarks
+- Run collaborative_benchmark in the docker to get the results of the collaboraive filtering
