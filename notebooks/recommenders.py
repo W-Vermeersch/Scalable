@@ -9,7 +9,7 @@ import numpy as np
 def jaccard_matrix(matrix):
     # matrix rows are binary genre vectors
     # intersection = dot product of binary vectors
-    intersection = np.dot(matrix, matrix.transpose)
+    intersection = matrix @ matrix.T
     # union = |A| + |B| - |A∩B|
     row_sums = matrix.sum(axis=1)
     union = row_sums[:, None] + row_sums[None, :] - intersection
@@ -95,6 +95,9 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
     for watched_id in user_history_ids: # Test by swithcing between sliced and not sliced history (better ranks or better performance)
 
         sim_set = item_model(watched_id, n)
+
+        if sim_set is None or sim_set.empty:
+            continue
 
 
         for w_idx in sim_set['anime_id']:
