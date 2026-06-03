@@ -7,9 +7,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
 def jaccard_matrix(matrix):
-    # intersection = dot product of binary vectors
+    # intersection as dot product of binary vectors
     intersection = matrix @ matrix.T
-    # union = |A| + |B| - |A∩B|
+    # union 
     row_sums = matrix.sum(axis=1)
     union = row_sums[:, None] + row_sums[None, :] - intersection
     return intersection / (union + 1e-9)
@@ -43,12 +43,12 @@ def train_item_item(anime_data, matrix_calc = cosine_similarity):
         idx = aid_to_uid[anime_id]
         scores = sim_matrix[idx]
 
-        # Get top-n most similar (excluding itself)
+        # Get top-n most similar (without itself)
         top_indices = np.argsort(scores)[::-1][1:n+1]
         
         results = pd.DataFrame({
-            'anime_id':  [uid_to_aid[i] for i in top_indices],
-            'similarity': [scores[i]     for i in top_indices]
+            'anime_id': [uid_to_aid[i] for i in top_indices],
+            'similarity': [scores[i] for i in top_indices]
         })
 
         return results
@@ -62,8 +62,7 @@ def train_item_item(anime_data, matrix_calc = cosine_similarity):
         weighted_scores = [
             sim_matrix[aid_to_uid[watched_id]][c_idx] * ((user_rating - 5.0) if user_rating != 0.0 else 0.0)
             for watched_id, user_rating in history_catalog
-            if watched_id in aid_to_uid
-            and watched_id != anime_id
+                if watched_id in aid_to_uid and watched_id != anime_id
         ]
 
         if not weighted_scores:
@@ -109,13 +108,7 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
         print(f'No candidates found for user {user_id}')
         return None
 
-    results = pd.DataFrame([
-        {
-            'anime_id':     aid,
-            'avg_sim':      scores,
-        }
-        for aid, scores in candidate_scores.items()
-    ])
+    results = pd.DataFrame([{'anime_id': aid, 'avg_sim': scores,} for aid, scores in candidate_scores.items()])
 
     # Normalize avg_sim
     s_min, s_max = results['avg_sim'].min(), results['avg_sim'].max()
@@ -142,8 +135,7 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
     target_user = spark.createDataFrame([(user_id,)], ['user_id'])
     UI_rec = user_item.recommendForUserSubset(
         target_user, n * 5
-        ).select('user_id', 
-                explode('recommendations').alias('rec')
+        ).select('user_id', explode('recommendations').alias('rec')
             ).select(
             col('rec.anime_id').alias('anime_id'),
             col('rec.rating').alias('ui_score')
@@ -161,9 +153,8 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
         ['user_id', 'anime_id', "ii_score"]
     )
     II_rec_with_UI = user_item.transform(pairs) \
-        .select('anime_id', col('prediction').alias('ui_score'), 'ii_score') \
-        .dropna(subset=['ui_score']) \
-        .toPandas()
+        .select('anime_id', col('prediction').alias('ui_score'), 'ii_score'
+                ).dropna(subset=['ui_score']).toPandas()
 
     # Merge recommends from item-item and user-item
     merged = pd.concat([
