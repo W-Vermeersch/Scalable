@@ -1,13 +1,12 @@
 import numpy as np
 from pyspark.ml.feature import CountVectorizer
-from pyspark.sql.functions import split, lower, trim, col, regexp_replace, explode, min, max, lit, udf, mean
+from pyspark.sql.functions import split, lower, trim, col, explode
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 import numpy as np
 
 def jaccard_matrix(matrix):
-    # matrix rows are binary genre vectors
     # intersection = dot product of binary vectors
     intersection = matrix @ matrix.T
     # union = |A| + |B| - |A∩B|
@@ -29,45 +28,41 @@ def train_item_item(anime_data, matrix_calc = cosine_similarity):
 
     # Build matrix and compute all pairwise similarities at once
     matrix = np.vstack(anime_pd['vec'].values)
-    sim_matrix = matrix_calc(matrix)  # shape: (n_anime, n_anime)
+    sim_matrix = matrix_calc(matrix)  # shape: n_anime x n_anime
 
     # Map index → anime_id
-    idx_to_uid = anime_pd['anime_id'].to_dict()
-    uid_to_idx = {v: k for k, v in idx_to_uid.items()}
+    uid_to_aid = anime_pd['anime_id'].to_dict()
+    aid_to_uid = {v: k for k, v in uid_to_aid.items()}
 
-    # genre_lookup = anime_clean.select('anime_id', 'genre').toPandas().set_index('anime_id')
 
     def content_recommend(anime_id, n=10):
-        if anime_id not in uid_to_idx:
+        if anime_id not in aid_to_uid:
             print(f'anime_id {anime_id} not found')
             return
 
-        idx = uid_to_idx[anime_id]
+        idx = aid_to_uid[anime_id]
         scores = sim_matrix[idx]
 
         # Get top-n most similar (excluding itself)
         top_indices = np.argsort(scores)[::-1][1:n+1]
         
         results = pd.DataFrame({
-            'anime_id':  [idx_to_uid[i] for i in top_indices],
+            'anime_id':  [uid_to_aid[i] for i in top_indices],
             'similarity': [scores[i]     for i in top_indices]
         })
-        
-        # Join genre info back
-        # results['genre'] = results['anime_id'].map(genre_lookup['genre'])
-        
+
         return results
     
     def score_base_history(anime_id, history_catalog):
-        if anime_id not in uid_to_idx:
+        if anime_id not in aid_to_uid:
             return 0.0
 
-        c_idx = uid_to_idx[anime_id]
+        c_idx = aid_to_uid[anime_id]
 
         weighted_scores = [
-            sim_matrix[uid_to_idx[watched_id]][c_idx] * ((user_rating - 5.0) if user_rating != 0.0 else 0.0)
+            sim_matrix[aid_to_uid[watched_id]][c_idx] * ((user_rating - 5.0) if user_rating != 0.0 else 0.0)
             for watched_id, user_rating in history_catalog
-            if watched_id in uid_to_idx
+            if watched_id in aid_to_uid
             and watched_id != anime_id
         ]
 
@@ -134,20 +129,18 @@ def get_similar_items_for_user(user_id, dataset, item_model, score_history,n=10)
 
 def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10, ui_weight=0.5, ii_weight=0.5):
     
-
+    # Get item-item candidates
     II_rec = item_item(user_id, n * 5)
 
     # Build history catalog
     history_catalog = list(zip(
-        dataset.filter(col('user_id') == user_id)
-               .select('anime_id', 'score').toPandas()['anime_id'],
-        dataset.filter(col('user_id') == user_id)
-               .select('anime_id', 'score').toPandas()['score']
+        dataset.filter(col('user_id') == user_id).select('anime_id', 'score').toPandas()['anime_id'],
+        dataset.filter(col('user_id') == user_id).select('anime_id', 'score').toPandas()['score']
     ))
 
-    # ALS recommendations
+    # Get user-item candidates (ALS recommendations)
     target_user = spark.createDataFrame([(user_id,)], ['user_id'])
-    UI_rec_pd = user_item.recommendForUserSubset(
+    UI_rec = user_item.recommendForUserSubset(
         target_user, n * 5
         ).select('user_id', 
                 explode('recommendations').alias('rec')
@@ -157,29 +150,25 @@ def hybridV1(user_id, user_item, item_item, dataset, score_history, spark, n=10,
         ).toPandas()
 
     # Compute ii_score for user-item
-    UI_rec_pd['ii_score'] = UI_rec_pd['anime_id'].apply(
+    UI_rec['ii_score'] = UI_rec['anime_id'].apply(
         lambda aid: score_history(aid, history_catalog)
     )
+    UI_rec_with_II = UI_rec
 
-    # --- Step 4: Score II candidates through ALS ---
+    # UI_Score over item-item candidates
     pairs = spark.createDataFrame(
-        [(user_id, int(aid)) for aid in II_rec['anime_id']],
-        ['user_id', 'anime_id']
+        [(user_id, int(a_id), score) for a_id, score in zip(II_rec['anime_id'], II_rec['final_score'])],
+        ['user_id', 'anime_id', "ii_score"]
     )
-
-    II_rec_pd = user_item.transform(pairs) \
-        .select('anime_id', col('prediction').alias('ui_score')) \
+    II_rec_with_UI = user_item.transform(pairs) \
+        .select('anime_id', col('prediction').alias('ui_score'), 'ii_score') \
         .dropna(subset=['ui_score']) \
         .toPandas()
 
-    II_rec_pd['ii_score'] = II_rec_pd['anime_id'].apply(
-        lambda aid: score_history(aid, history_catalog)
-    )
-
     # Merge recommends from item-item and user-item
     merged = pd.concat([
-        UI_rec_pd[['anime_id', 'ui_score', 'ii_score']],
-        II_rec_pd[['anime_id', 'ui_score', 'ii_score']]
+        UI_rec_with_II[['anime_id', 'ui_score', 'ii_score']],
+        II_rec_with_UI[['anime_id', 'ui_score', 'ii_score']]
     ]).groupby('anime_id', as_index=False).mean()
 
     # Normalize ui- & ii-score 
@@ -204,4 +193,4 @@ def calculate_ui_weights_size(size, scaler=1.0):
     history_factor = np.clip(size / (10.0 * scaler), 1.0, 10.0)
     weight = 0.2 * history_factor
 
-    return np.clip(weight, 0.2, 0.8)
+    return np.clip(weight, 0.1, 0.9)

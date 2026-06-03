@@ -8,11 +8,20 @@ anime-spark/
 ├── docker-compose.yml
 ├── .dockerignore
 ├── notebooks/
-│   └── anime_recommender.ipynb   ← starter notebook
+|    ├── collaboratif_benchmark.ipynb   -> Becnhmark of collaborative filtering
+|    ├── collaboratif_plot.ipynb        -> Plot of collaborative filtering becnhmark 
+|    ├── collaboratif_final.ipynb       -> Training of user-item recommender system
+|    ├── Draft_collaborative.ipynb      -> Testing of collaborative filtering
+|    ├── sparsed_data.ipynb             -> Creation of dataset with sparsed data for benchmark purposes
+|    ├── start_up.ipynb                 -> File to start spark session with read of csv data
+|    ├── test_content.ipynb             -> File to start spark session with read of csv data
+|    ├── recommenders.py                -> Functions to create content-based and hybrid recommeder system
+|    ├── coverage.py                    -> Functions to test precision & diversity in recommender systems
+|    └── plotting_rating_numbers.ipynb  -> Benchmark & plotting of collaborative filtering (user-item), content-based (iter-item) and hybrid
 └── data/
     └── preprocessed/
-        ├── reviews.csv
-        └── animes.csv            ← put your CSV files here
+        ├── reviews.csv     -> Data of review after preprocessing
+        └── animes.csv      -> Data about anime after preprocessing
 ```
 
 ## First-time setup
@@ -41,14 +50,3 @@ docker compose down      # stop (notebooks and data are preserved)
 |------------|----------------------------|
 | Jupyter Lab | http://localhost:8888?token=anime123 |
 | Spark UI   | http://localhost:4040       |
-
-## Notes
-
-- Java 17 is used inside the container — no `--add-opens` flags needed.
-- Any notebooks you save inside `notebooks/` persist on your local machine.
-- Your CSV data is mounted read-only; Spark reads it directly from `data/preprocessed/`.
-- To change the token, edit `JUPYTER_TOKEN` and `--NotebookApp.token` in `docker-compose.yml`.
-
-
-# Benchmarks
-- Run collaborative_benchmark in the docker to get the results of the collaboraive filtering

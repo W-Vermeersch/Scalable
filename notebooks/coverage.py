@@ -17,33 +17,10 @@ def precision_recall_at_k(user_id, recommendations, dataset, k=10, threshold=7.0
 
     precision = len(hits) / k
 
-    return {
-        'precision@k': precision,
-        'hits':        len(hits),
-        'k':           k,
-        'n_relevant':  len(relevant)
-    }
-
-
-def catalog_coverage(recommendations_list, dataset, sample_n=100):
-    """
-    recommendations_list : list of pandas DataFrames, one per user
-    sample_n             : how many users to sample (full run is expensive)
-    """
-    all_recommended = set()
-    total_anime = dataset.select('anime_id').distinct().count()
-
-    for recs in recommendations_list:
-        if recs is not None:
-            all_recommended.update(recs['anime_id'].tolist())
-
-    coverage = len(all_recommended) / total_anime
-    print(f'Catalog coverage: {coverage:.2%} ({len(all_recommended)} / {total_anime} anime)')
-    return coverage
+    return precision
 
 
 def diversity_score(recommendations, anime_data):
-
 
     recs_with_genre = recommendations.merge(
         anime_data.select('anime_id', 'genre').toPandas(),
@@ -66,21 +43,6 @@ def diversity_score(recommendations, anime_data):
         dissimilarities.append(1.0 - jaccard_sim)  # dissimilarity
 
     return float(np.mean(dissimilarities)) if dissimilarities else 0.0
-
-
-def novelty_score(recommendations, dataset):
-    popularity = dataset.groupBy('anime_id') \
-        .count().toPandas().set_index('anime_id')['count']
-
-    total_users = dataset.select('user_id').distinct().count()
-
-    scores = []
-    for aid in recommendations['anime_id']:
-        pop = popularity.get(aid, 1)
-        novelty = -np.log2(pop / total_users + 1e-9)
-        scores.append(novelty)
-
-    return float(np.mean(scores))
 
 def evaluate_all(user_id, ui_model, ui_model_better, ii_model, final_data, 
                  score_history, anime_data, spark, k=10):
@@ -142,12 +104,10 @@ def evaluate_all(user_id, ui_model, ui_model_better, ii_model, final_data,
 
         pr = precision_recall_at_k(user_id, recs, final_data, k=k)
         div = diversity_score(recs, anime_data)
-        nov = novelty_score(recs, final_data)
 
         results[name] = {
-            'precision@k': round(pr['precision@k'], 4),
+            'precision@k': round(pr, 4),
             'diversity': round(div, 4),
-            'novelty': round(nov, 4),
         }
     print(f"Number of ratings: {final_data.filter(col('user_id') == user_id).count()}")
     return pd.DataFrame(results).transpose
